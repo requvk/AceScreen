@@ -5,12 +5,15 @@ if [ "$(uname -m)" = "mips" ]; then
 fi
 
 KLIPPER_HOME="${HOME}/klipper"
+KLIPPER_ENV="${HOME}/klippy-env"
 KLIPPER_CONFIG_HOME="${HOME}/printer_data/config"
 MOONRAKER_CONFIG_DIR="${HOME}/printer_data/config"
 SRCDIR="$PWD"
 
+
 if [ "$IS_MIPS" -eq 1 ]; then
     KLIPPER_HOME="/usr/share/klipper"
+    KLIPPER_ENV="/usr/share/klippy-env"
     KLIPPER_CONFIG_HOME="/usr/data/printer_data/config"
     MOONRAKER_CONFIG_DIR="/usr/data/printer_data/config"
 fi
@@ -62,14 +65,30 @@ link_extension()
 {
     echo -n "Linking extension to Klipper... "
     ln -sf "${SRCDIR}/extras/ace.py" "${KLIPPER_HOME}/klippy/extras/ace.py"
+    ln -sf "${SRCDIR}/extras/mmu.py" "${KLIPPER_HOME}/klippy/extras/mmu.py"
+    ln -sf "${SRCDIR}/extras/mmu_machine.py" "${KLIPPER_HOME}/klippy/extras/mmu_machine.py"
     echo "[OK]"
 }
 
 copy_config()
 {
   echo -n "Copy config file to Klipper... "
-  cp "./ace.cfg" "${KLIPPER_CONFIG_HOME}"
-  echo "[OK]"
+  echo -n "[WARNING] If you have custom [save_variables], you must place the ace_vars.cfg data in your vars file and comment out [save_variables] in ace.cfg"
+  if [ ! -f "${KLIPPER_CONFIG_HOME}/ace.cfg" ]; then
+      cat "${SRCDIR}/ace.cfg" | sed -e "s|{config_path}|${KLIPPER_CONFIG_HOME}|g" > ace.cfg.tmp
+      mv ace.cfg.tmp "${KLIPPER_CONFIG_HOME}/ace.cfg"
+      cp ace_vars.cfg "${KLIPPER_CONFIG_HOME}/ace_vars.cfg"
+      echo "[OK]"
+  else
+      echo "[SKIPPED]"
+  fi
+}
+
+install_requirements()
+{
+    echo -n "Install requirements... "
+    "${KLIPPER_ENV}/bin/pip" install -r "${SRCDIR}/requirements.txt"
+    echo "[OK]"
 }
 
 uninstall()
@@ -78,7 +97,7 @@ uninstall()
         echo -n "Uninstalling... "
         rm -f "${KLIPPER_HOME}/klippy/extras/ace.py"
         echo "[OK]"
-        echo "You can now remove the [update_manager FrogAce] section in your moonraker.conf and delete this directory. Also remove all led_effect configurations from your Klipper configuration."
+        echo "You can now remove the [update_manager BunnyAce] section in your moonraker.conf and delete this directory. Also remove all led_effect configurations from your Klipper configuration."
     else
         echo "ace.py not found in \"${KLIPPER_HOME}/klippy/extras/\". Is it installed?"
         echo "[FAILED]"
@@ -88,26 +107,43 @@ uninstall()
 restart_moonraker()
 {
     echo -n "Restarting Moonraker... "
-    set +e
-    /etc/init.d/S56moonraker_service restart
+    sudo systemctl restart moonraker
     sleep 1
-    set -e
     echo "[OK]"
+}
+
+start_moonraker() {
+  echo -n "Starting Moonraker... "
+  /etc/init.d/S56moonraker_service start
+  sleep 1
+  echo "[OK]"
+}
+
+stop_moonraker() {
+  echo -n "Stopping Moonraker... "
+  /etc/init.d/S56moonraker_service stop
+  sleep 1
+  echo "[OK]"
 }
 
 start_klipper() {
   echo -n "Starting Klipper... "
-  set +e
-  /etc/init.d/S55klipper_service start
-  set -e
+  if [ "$IS_MIPS" -eq 1 ]; then
+    /etc/init.d/S55klipper_service start
+  else
+    sudo systemctl start klipper
+  fi
   echo "[OK]"
 }
 
+
 stop_klipper() {
   echo -n "Stopping Klipper... "
-  set +e
-  /etc/init.d/S55klipper_service stop
-  set -e
+  if [ "$IS_MIPS" -eq 1 ]; then
+    /etc/init.d/S55klipper_service stop
+  else
+    sudo systemctl stop klipper
+  fi
   echo "[OK]"
 }
 
@@ -115,18 +151,25 @@ add_updater()
 {
     echo -n "Adding update manager to moonraker.conf... "
     update_section=0
-    update_section=$(grep -c '\[update_manager[a-z ]* FrogAce\]' "${MOONRAKER_CONFIG_DIR}/moonraker.conf" || true)
+    update_section=$(grep -c '\[update_manager[a-z ]* BunnyACE\]' "${MOONRAKER_CONFIG_DIR}/moonraker.conf" || true)
     if [ "$update_section" -eq 0 ]; then
-        echo -e "\n[update_manager BunnyACE]" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "type: git_repo" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "path: ${SRCDIR}" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "origin: https://github.com/BlackFrogKok/BunnyACE" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "managed_services: klipper" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo -e "\n" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
+        echo "\n" >> ${MOONRAKER_CONFIG_DIR}/moonraker.conf
+        while read -r line; do
+            echo "${line}" >> ${MOONRAKER_CONFIG_DIR}/moonraker.conf
+        done < "${SRCDIR}/templates/moonraker_update.txt"
+        echo "\n" >> ${MOONRAKER_CONFIG_DIR}/moonraker.conf
         echo "[OK]"
+
+        if [ "$IS_MIPS" -eq 1 ]; then
+          stop_moonraker
+          start_moonraker
+        else
+          restart_moonraker
+        fi
     else
         echo "[SKIPPED]"
     fi
+
 }
 
 
@@ -138,7 +181,6 @@ if [ "$UNINSTALL" -ne 1 ]; then
     link_extension
     copy_config
     add_updater
-    restart_moonraker
 else
     uninstall
 fi
