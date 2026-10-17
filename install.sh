@@ -8,7 +8,8 @@ KLIPPER_HOME="${HOME}/klipper"
 KLIPPER_ENV="${HOME}/klippy-env"
 KLIPPER_CONFIG_HOME="${HOME}/printer_data/config"
 MOONRAKER_CONFIG_DIR="${HOME}/printer_data/config"
-SRCDIR="$PWD"
+SRCDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+KLIPPERSCREEN_HOME="${KLIPPERSCREEN_HOME:-}"
 
 
 if [ "$IS_MIPS" -eq 1 ]; then
@@ -31,7 +32,7 @@ done
 verify_ready()
 {
   if [ "$IS_MIPS" -ne 1 ]; then
-    if [ "$EUID" -eq 0 ]; then
+    if [ "$(id -u)" -eq 0 ]; then
         echo "[ERROR] This script must not run as root. Exiting."
         exit 1
     fi
@@ -64,24 +65,162 @@ check_folders()
 link_extension()
 {
     echo -n "Linking extension to Klipper... "
-    ln -sf "${SRCDIR}/extras/ace.py" "${KLIPPER_HOME}/klippy/extras/ace.py"
-    ln -sf "${SRCDIR}/extras/mmu.py" "${KLIPPER_HOME}/klippy/extras/mmu.py"
-    ln -sf "${SRCDIR}/extras/mmu_machine.py" "${KLIPPER_HOME}/klippy/extras/mmu_machine.py"
+    for extension in "${SRCDIR}"/extras/*.py; do
+        [ -f "$extension" ] || continue
+        extension_name=${extension##*/}
+        # The screen panel belongs in KlipperScreen, not Klipper extras.
+        [ "$extension_name" = acepro.py ] && continue
+        ln -sfn "$extension" "${KLIPPER_HOME}/klippy/extras/${extension_name}" || return 1
+    done
     echo "[OK]"
 }
 
 copy_config()
 {
-  echo -n "Copy config file to Klipper... "
-  echo -n "[WARNING] If you have custom [save_variables], you must place the ace_vars.cfg data in your vars file and comment out [save_variables] in ace.cfg"
-  if [ ! -f "${KLIPPER_CONFIG_HOME}/ace.cfg" ]; then
-      cat "${SRCDIR}/ace.cfg" | sed -e "s|{config_path}|${KLIPPER_CONFIG_HOME}|g" > ace.cfg.tmp
-      mv ace.cfg.tmp "${KLIPPER_CONFIG_HOME}/ace.cfg"
-      cp ace_vars.cfg "${KLIPPER_CONFIG_HOME}/ace_vars.cfg"
-      echo "[OK]"
+  echo "[WARNING] If you have custom [save_variables], place the ace_vars.cfg data in your vars file and comment out [save_variables] in ace.cfg."
+  if [ -e "${KLIPPER_CONFIG_HOME}/ace.cfg" ] || [ -L "${KLIPPER_CONFIG_HOME}/ace.cfg" ]; then
+      echo "[SKIPPED] Existing ace.cfg preserved"
   else
-      echo "[SKIPPED]"
+      config_temporary=$(mktemp "${KLIPPER_CONFIG_HOME}/.acecfg.XXXXXX") || return 1
+      config_path_escaped=$(printf '%s\n' "$KLIPPER_CONFIG_HOME" | sed 's/[\\&|]/\\&/g') || return 1
+      if ! sed "s|{config_path}|${config_path_escaped}|g" "${SRCDIR}/ace.cfg" > "$config_temporary" || \
+         ! chmod 644 "$config_temporary" || \
+         ! mv -f "$config_temporary" "${KLIPPER_CONFIG_HOME}/ace.cfg"; then
+          rm -f "$config_temporary"
+          return 1
+      fi
+      echo "[OK] Created ace.cfg"
   fi
+  if [ -e "${KLIPPER_CONFIG_HOME}/ace_vars.cfg" ] || [ -L "${KLIPPER_CONFIG_HOME}/ace_vars.cfg" ]; then
+      echo "[SKIPPED] Existing ace_vars.cfg preserved"
+  else
+      cp "${SRCDIR}/ace_vars.cfg" "${KLIPPER_CONFIG_HOME}/ace_vars.cfg" || return 1
+      echo "[OK] Created ace_vars.cfg"
+  fi
+}
+
+has_config_section()
+{
+    [ -f "$1" ] || return 1
+    awk -v expected="$2" '
+        /^[ \t]*\[[^]]+\]/ {
+            name = $0
+            sub(/^[ \t]*\[/, "", name)
+            sub(/\].*$/, "", name)
+            gsub(/^[ \t]+|[ \t\r]+$/, "", name)
+            gsub(/[ \t]+/, " ", name)
+            if (name == expected) found = 1
+        }
+        END { exit !found }
+    ' "$1"
+}
+
+append_config_section()
+{
+    section_file=$1
+    section_template=$2
+    section_name=$3
+    if has_config_section "$section_file" "$section_name"; then
+        echo "[SKIPPED] Existing [$section_name] preserved"
+        return 0
+    fi
+    [ -r "$section_template" ] || return 1
+    if ! has_config_section "$section_template" "$section_name"; then
+        echo "[ERROR] Template is missing [$section_name]: $section_template"
+        return 1
+    fi
+    section_backup="${section_file}.bak"
+    # Preserve a user's config symlink when adding the section to its target.
+    if [ -L "$section_file" ]; then
+        section_file=$(readlink -f "$section_file") || return 1
+        [ -f "$section_file" ] || return 1
+    fi
+    section_existing="$section_file"
+    section_temporary=$(mktemp "${section_file%/*}/.acescreen.XXXXXX") || return 1
+    if [ -f "$section_file" ]; then
+        if ! cp -p "$section_file" "$section_temporary"; then
+            rm -f "$section_temporary"
+            return 1
+        fi
+    else
+        section_existing=/dev/null
+        chmod 644 "$section_temporary" || { rm -f "$section_temporary"; return 1; }
+    fi
+    # Insert before KlipperScreen generated settings, or append at EOF.
+    if ! awk '
+        FNR == NR { template = template $0 "\n"; next }
+        function insert_section() {
+            if (!inserted) {
+                if (has_content) printf "\n"
+                printf "%s", template
+                inserted = 1
+            }
+        }
+        /^#~# --- Do not edit below this line[.]/ { insert_section() }
+        { print; has_content = 1 }
+        END { insert_section() }
+    ' "$section_template" "$section_existing" > "$section_temporary"; then
+        rm -f "$section_temporary"
+        return 1
+    fi
+    if [ -f "$section_file" ]; then
+        if ! cp -p "$section_file" "$section_backup"; then
+            rm -f "$section_temporary"
+            return 1
+        fi
+    fi
+    mv -f "$section_temporary" "$section_file" || { rm -f "$section_temporary"; return 1; }
+    echo "[OK] Added [$section_name]"
+}
+
+find_klipperscreen()
+{
+    if [ -z "$KLIPPERSCREEN_HOME" ]; then
+        for screen_candidate in "${HOME}/KlipperScreen" /usr/share/KlipperScreen /usr/data/KlipperScreen; do
+            if [ -d "${screen_candidate}/panels" ]; then
+                KLIPPERSCREEN_HOME="$screen_candidate"
+                break
+            fi
+        done
+    fi
+    if [ -z "$KLIPPERSCREEN_HOME" ] || [ ! -d "${KLIPPERSCREEN_HOME}/panels" ]; then
+        echo "[ERROR] KlipperScreen not found. Set KLIPPERSCREEN_HOME to its installation directory."
+        return 1
+    fi
+}
+
+install_screen_config()
+{
+    find_klipperscreen || return 1
+    if [ ! -r "${SRCDIR}/templates/acepro.css" ]; then
+        echo "[ERROR] Missing panel stylesheet: ${SRCDIR}/templates/acepro.css"
+        return 1
+    fi
+    screen_panel="${KLIPPERSCREEN_HOME}/panels/acepro.py"
+    if [ -f "$screen_panel" ] && [ ! -L "$screen_panel" ]; then
+        cp -p "$screen_panel" "${screen_panel}.bak" || return 1
+    fi
+    ln -sfn "${SRCDIR}/extras/acepro.py" "$screen_panel" || return 1
+
+    screen_macros="${KLIPPER_CONFIG_HOME}/ace_screen.cfg"
+    if [ -f "$screen_macros" ]; then
+        cp -p "$screen_macros" "${screen_macros}.bak" || return 1
+    fi
+    screen_temporary=$(mktemp "${KLIPPER_CONFIG_HOME}/.acescreen.XXXXXX") || return 1
+    if ! cp -p "${SRCDIR}/ace_screen.cfg" "$screen_temporary" || \
+       ! mv -f "$screen_temporary" "$screen_macros"; then
+        rm -f "$screen_temporary"
+        return 1
+    fi
+    echo "[OK] Replaced ace_screen.cfg; previous file saved as ace_screen.cfg.bak if present."
+
+    screen_menu="${KLIPPER_CONFIG_HOME}/KlipperScreen.conf"
+    if [ ! -f "$screen_menu" ] && [ -f "${KLIPPER_CONFIG_HOME}/klipperscreen.conf" ]; then
+        screen_menu="${KLIPPER_CONFIG_HOME}/klipperscreen.conf"
+    fi
+    append_config_section "$screen_menu" "${SRCDIR}/templates/KlipperScreen.txt" \
+        'menu __main acescreen' || return 1
+    echo "Include ace_screen.cfg AFTER ace.cfg in printer.cfg."
 }
 
 install_requirements()
@@ -96,8 +235,15 @@ uninstall()
     if [ -f "${KLIPPER_HOME}/klippy/extras/ace.py" ]; then
         echo -n "Uninstalling... "
         rm -f "${KLIPPER_HOME}/klippy/extras/ace.py"
+        rm -f "${KLIPPER_HOME}/klippy/extras/ace_protocol.py"
+        rm -f "${KLIPPER_HOME}/klippy/extras/ace_screen.py"
+        if find_klipperscreen && [ -L "${KLIPPERSCREEN_HOME}/panels/acepro.py" ]; then
+            if grep -Fq 'Standalone KlipperScreen panel; installed as panels/acepro.py.' "${KLIPPERSCREEN_HOME}/panels/acepro.py"; then
+                rm -f "${KLIPPERSCREEN_HOME}/panels/acepro.py"
+            fi
+        fi
         echo "[OK]"
-        echo "You can now remove the [update_manager BunnyAce] section in your moonraker.conf and delete this directory. Also remove all led_effect configurations from your Klipper configuration."
+        echo "Remove the [update_manager AceScreen] section from moonraker.conf and [include ace_screen.cfg] / [include ace.cfg] from printer.cfg."
     else
         echo "ace.py not found in \"${KLIPPER_HOME}/klippy/extras/\". Is it installed?"
         echo "[FAILED]"
@@ -136,6 +282,22 @@ start_klipper() {
   echo "[OK]"
 }
 
+restart_klipperscreen()
+{
+    echo "Restarting KlipperScreen..."
+    if [ "$(id -u)" -eq 0 ]; then
+        systemctl restart KlipperScreen
+    else
+        sudo systemctl restart KlipperScreen
+    fi
+    screen_restart_status=$?
+    if [ "$screen_restart_status" -ne 0 ]; then
+        echo "[ERROR] Unable to restart KlipperScreen."
+        return "$screen_restart_status"
+    fi
+    echo "[OK]"
+}
+
 
 stop_klipper() {
   echo -n "Stopping Klipper... "
@@ -150,24 +312,17 @@ stop_klipper() {
 add_updater()
 {
     echo -n "Adding update manager to moonraker.conf... "
-    update_section=0
-    update_section=$(grep -c '\[update_manager[a-z ]* BunnyACE\]' "${MOONRAKER_CONFIG_DIR}/moonraker.conf" || true)
-    if [ "$update_section" -eq 0 ]; then
-        echo "\n" >> ${MOONRAKER_CONFIG_DIR}/moonraker.conf
-        while read -r line; do
-            echo "${line}" >> ${MOONRAKER_CONFIG_DIR}/moonraker.conf
-        done < "${SRCDIR}/templates/moonraker_update.txt"
-        echo "\n" >> ${MOONRAKER_CONFIG_DIR}/moonraker.conf
-        echo "[OK]"
-
-        if [ "$IS_MIPS" -eq 1 ]; then
-          stop_moonraker
-          start_moonraker
-        else
-          restart_moonraker
-        fi
+    if has_config_section "${MOONRAKER_CONFIG_DIR}/moonraker.conf" 'update_manager AceScreen'; then
+        echo "[SKIPPED] Existing section preserved"
+        return 0
+    fi
+    append_config_section "${MOONRAKER_CONFIG_DIR}/moonraker.conf" \
+        "${SRCDIR}/templates/moonraker_update.txt" 'update_manager AceScreen' || return 1
+    if [ "$IS_MIPS" -eq 1 ]; then
+        stop_moonraker
+        start_moonraker
     else
-        echo "[SKIPPED]"
+        restart_moonraker
     fi
 
 }
@@ -175,14 +330,22 @@ add_updater()
 
 verify_ready
 check_folders
+if [ "$UNINSTALL" -ne 1 ]; then
+    find_klipperscreen || exit 1
+fi
 stop_klipper
 
 if [ "$UNINSTALL" -ne 1 ]; then
-    link_extension
-    copy_config
-    add_updater
+    if ! link_extension || ! copy_config || ! install_screen_config || ! add_updater; then
+        echo "[ERROR] Unable to complete installation."
+        start_klipper
+        exit 1
+    fi
 else
     uninstall
 fi
 
 start_klipper
+if [ "$UNINSTALL" -ne 1 ]; then
+    restart_klipperscreen || exit 1
+fi
