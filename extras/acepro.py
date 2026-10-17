@@ -224,7 +224,7 @@ class Panel(ScreenPanel):
 
     def _unload_clicked(self, widget):
         if self._safe() and self.snapshot.get('filament_present', False):
-            self._send(widget, 'ACE_UI_UNLOAD')
+            self._send(widget, '_ACE_UI_UNLOAD')
 
     def _gate_clicked(self, widget, gate):
         if (not self._safe() or self.dialog is not None or self.gate_dialog is not None
@@ -258,7 +258,7 @@ class Panel(ScreenPanel):
         valid = self._safe() and self._valid_context(context)
         self._close_gate_dialog()
         if valid:
-            self._send(None, 'ACE_UI_%s GATE=%d' % (action, context['gate']))
+            self._send(None, '_ACE_UI_%s GATE=%d' % (action, context['gate']))
 
     def _close_gate_dialog(self, dialog=None, *args):
         if self.gate_dialog is not None and (dialog is None or dialog is self.gate_dialog):
@@ -680,7 +680,7 @@ class Panel(ScreenPanel):
             return
         self.saving = True
         self._selection_changed()
-        script = ('ACE_UI_SET_FILAMENT GATE=%d TOKEN=%d MATERIAL=%s COLOR=%s MANUAL=%d'
+        script = ('_ACE_UI_SET_FILAMENT GATE=%d TOKEN=%d MATERIAL=%s COLOR=%s MANUAL=%d'
                   % (context['gate'], context['token'], self.selection['material'],
                      self.selection['color'], context['manual']))
         self.choice_label.set_text('Сохранение…')
@@ -718,7 +718,7 @@ class Panel(ScreenPanel):
         if context and not self.saving:
             self.suppressed.add((context['gate'], context['token']))
             if not context['manual']:
-                self._send(None, 'ACE_UI_ACK_INSERTION GATE=%d TOKEN=%d'
+                self._send(None, '_ACE_UI_ACK_INSERTION GATE=%d TOKEN=%d'
                            % (context['gate'], context['token']))
             self._close_picker()
 

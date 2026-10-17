@@ -142,7 +142,7 @@ class AceScreen:
             self.variables.allVariables.clear()
             self.variables.allVariables.update(previous_variables)
             raise
-        self._script('ACE_UI_ACK_INSERTION GATE=%d TOKEN=%d' % (gate, token))
+        self._script('_ACE_UI_ACK_INSERTION GATE=%d TOKEN=%d' % (gate, token))
         gcmd.respond_info('ACE: катушка %d: %s, #%s, %g C сохранены'
                          % (gate + 1, material, color, temperature))
 
