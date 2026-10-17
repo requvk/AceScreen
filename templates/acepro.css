@@ -1,0 +1,250 @@
+/* Applied only to AceScreen widgets, above the KlipperScreen theme. */
+label {
+    color: #f4f6fa;
+}
+.ace-heading {
+    font-size: 1.35em;
+    font-weight: 600;
+    padding: .15em .3em;
+}
+button {
+    background-image: none;
+    background-color: #303a49;
+    border: 1px solid #566277;
+    border-radius: 8px;
+    box-shadow: none;
+    text-shadow: none;
+    margin: 2px;
+    padding: .3em .5em;
+}
+button:active, button.suggested-action {
+    background-color: #2c609f;
+    border-color: #83b7ff;
+}
+button:disabled {
+    background-color: #252d39;
+    border-color: #3c4657;
+    opacity: .55;
+}
+button:disabled label {
+    color: #c1c8d3;
+}
+.ace-card {
+    background-color: #252e3b;
+    border: 1px solid #526075;
+    border-radius: 10px;
+    padding: .3em;
+}
+button.ace-gate {
+    background-color: transparent;
+    border-color: transparent;
+    margin: 0;
+    padding: .25em;
+}
+button.ace-gate:active {
+    background-color: #36475f;
+    border-color: #83b7ff;
+}
+.ace-name {
+    font-size: 1.12em;
+    font-weight: bold;
+    margin-bottom: calc(.5em + 20px);
+}
+.ace-number {
+    font-size: 1.2em;
+    font-weight: bold;
+    background-color: #252e3b;
+    padding: 0 .2em;
+}
+button.ace-edit, button.ace-action {
+    background-color: #356bb3;
+    border-color: #6093d5;
+    min-height: 1.4em;
+}
+button.ace-edit {
+    padding-top: .70em;
+    padding-bottom: .70em;
+}
+button.ace-action {
+    min-height: 4.5em;
+    margin-top: .4em;
+}
+button.ace-action label {
+    font-size: 1.4em;
+}
+button.ace-edit:active, button.ace-action:active {
+    background-color: #244d83;
+}
+button.ace-edit:disabled {
+    background-color: #303b4e;
+    border-color: #46536a;
+}
+button.ace-drying {
+    border-color: #e39542;
+}
+.ace-message {
+    font-size: .8em;
+    color: #d6dfeb;
+    padding: .2em;
+    margin-bottom: .4em;
+}
+.ace-dryer-dialog, .ace-spool-dialog {
+    background-color: #171e27;
+    border: 1px solid #526075;
+    border-radius: 12px;
+    padding: .45em;
+    margin: 0;
+}
+.ace-dryer-notice {
+    padding: .8em .6em;
+}
+.ace-dryer-notice-title {
+    font-size: 1.5em;
+    font-weight: 600;
+}
+.ace-dryer-setting {
+    background-color: #252e3b;
+    border: 1px solid #526075;
+    border-radius: 10px;
+    padding: .6em .6em;
+}
+.ace-dryer-caption {
+    color: #c3cddb;
+    font-weight: 600;
+}
+.ace-dryer-value {
+    background-color: #1b2431;
+    border: 1px solid #46566e;
+    border-radius: 8px;
+    font-size: 1.45em;
+    font-weight: bold;
+    padding: .15em .4em;
+}
+button.ace-dryer-step {
+    background-color: #356bb3;
+    border-color: #6093d5;
+    min-width: 2.8em;
+    padding: .2em .4em;
+}
+button.ace-dryer-step label {
+    font-size: 1.5em;
+    font-weight: bold;
+}
+button.ace-dryer-step:active, button.ace-dryer-confirm:active, button.ace-dialog-confirm:active,
+button.ace-spool-load:active, button.ace-spool-eject:active {
+    background-color: #244d83;
+}
+button.ace-dryer-step:disabled {
+    background-color: #303b4e;
+    border-color: #46536a;
+}
+button.ace-dryer-confirm, button.ace-dryer-cancel, button.ace-dialog-confirm, button.ace-dialog-cancel {
+    min-height: 2em;
+    padding: .3em .6em;
+    margin: .35em .15em 0;
+}
+button.ace-dryer-confirm, button.ace-dialog-confirm {
+    background-color: #356bb3;
+    border-color: #6093d5;
+}
+button.ace-dryer-cancel, button.ace-dialog-cancel {
+    background-color: #303a49;
+    border-color: #566277;
+}
+button.ace-dryer-confirm label, button.ace-dryer-cancel label,
+button.ace-dialog-confirm label, button.ace-dialog-cancel label {
+    font-size: 1.15em;
+    font-weight: 600;
+}
+.ace-spool-body {
+    padding: .4em .3em;
+}
+.ace-spool-caption {
+    color: #c3cddb;
+    padding: .25em 0 .6em;
+}
+button.ace-spool-load, button.ace-spool-eject {
+    min-height: 2.8em;
+    padding: .45em .6em;
+}
+button.ace-spool-load {
+    background-color: #356bb3;
+    border-color: #6093d5;
+}
+button.ace-spool-eject {
+    background-color: #303a49;
+    border-color: #83a1c5;
+}
+button.ace-spool-load label, button.ace-spool-eject label {
+    font-size: 1.15em;
+    font-weight: 600;
+}
+.ace-picker-dialog {
+    background-color: #171e27;
+    border: 1px solid #526075;
+    padding: .7em;
+    margin: 0;
+}
+.ace-picker-section {
+    background-color: #252e3b;
+    border: 1px solid #46566e;
+    border-radius: 12px;
+    padding: .7em;
+}
+.ace-picker-title {
+    font-size: 1.15em;
+    font-weight: 600;
+    padding-bottom: .15em;
+}
+button.ace-picker-material {
+    padding: .4em .5em;
+    border-color: #52647d;
+}
+.ace-material-name {
+    font-size: 1.1em;
+    font-weight: 600;
+}
+.ace-material-temp {
+    font-size: .8em;
+    color: #b9c8dc;
+}
+button.ace-picker-material.suggested-action {
+    background-color: #2c609f;
+    border-color: #a8d0ff;
+}
+button.ace-color {
+    background-color: transparent;
+    border: 3px solid transparent;
+    padding: 0;
+    margin: 2px;
+}
+button.ace-color.suggested-action {
+    background-color: transparent;
+    border-color: #a8d0ff;
+}
+.ace-picker-choice {
+    color: #b9c8dc;
+    font-size: .85em;
+    padding: .15em;
+}
+button.ace-picker-save, button.ace-picker-cancel {
+    min-height: 2.2em;
+    padding: .45em .8em;
+    margin: .35em .2em 0;
+}
+button.ace-picker-save {
+    background-color: #356bb3;
+    border-color: #6093d5;
+}
+button.ace-picker-save:disabled {
+    background-color: #252d39;
+    border-color: #3c4657;
+}
+button.ace-picker-cancel {
+    background-color: #303a49;
+    border-color: #566277;
+}
+button.ace-picker-save label, button.ace-picker-cancel label {
+    font-size: 1.05em;
+    font-weight: 600;
+}

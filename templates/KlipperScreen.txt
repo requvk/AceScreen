@@ -1,0 +1,4 @@
+[menu __main acescreen]
+name: ACE Pro
+icon: filament
+panel: acepro
