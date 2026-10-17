@@ -5,5 +5,5 @@ path: ~/AceScreen
 primary_branch: develop
 origin: https://github.com/requvk/AceScreen
 managed_services: klipper
-is_system_service: False
-install_script: install.sh
+# После обновления выполните вручную: cd ~/AceScreen && bash install.sh
+# Установщик применит конфигурацию и перезапустит KlipperScreen.
