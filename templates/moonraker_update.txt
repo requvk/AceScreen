@@ -1,8 +1,9 @@
 
-[update_manager BunnyACE]
+[update_manager AceScreen]
 type: git_repo
-path: ~/BunnyACE
-primary_branch: development
-origin: https://github.com/BlackFrogKok/BunnyACE
+path: ~/AceScreen
+primary_branch: develop
+origin: https://github.com/requvk/AceScreen
 managed_services: klipper
-is_system_service: False
+# После обновления выполните вручную: cd ~/AceScreen && bash install.sh
+# Установщик применит конфигурацию и перезапустит KlipperScreen.

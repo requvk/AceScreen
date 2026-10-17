@@ -5,6 +5,7 @@ import queue
 import traceback
 import serial
 from serial import SerialException
+from .ace_protocol import decode_responses
 
 
 class AceException(Exception):
@@ -278,6 +279,7 @@ class BunnyAce:
         return self._request_id
 
     def _serial_disconnect(self):
+        self.read_buffer.clear()
         if self._serial is not None and self._serial.is_open:
             self._serial.close()
             self._connected = False
@@ -288,15 +290,18 @@ class BunnyAce:
             self.ace_dev_fd = None
 
     def _connect(self, eventtime):
-        self.log_always('Try connecting')
+        logging.debug('ACE: Trying to connect to %s', self.serial_id)
 
         def info_callback(self, response):
-            if response.get('msg') != 'success':
-                self.log_error(f"ACE Error: {response.get('msg')}")
-            result = response.get('result', {})
-            model = result.get('model', 'Unknown')
-            firmware = result.get('firmware', 'Unknown')
-            self.log_always(f"{{2}}ACE: Connected to {model} {{0}} \n Firmware Version: {{3}}{firmware}{{0}}", True)
+            if response.get('code', 0) != 0 or response.get('msg', 'success') != 'success':
+                self.log_error("ACE Error: " + str(response.get('msg', 'get_info failed')))
+                return
+            if not isinstance(response.get('result'), dict):
+                self.log_error('ACE Error: Invalid get_info response')
+                return
+            if not getattr(self, '_connection_success_reported', False):
+                self._connection_success_reported = True
+                self.log_always('echo: ACE Pro успешно подключён')
 
         try:
             self._serial = serial.Serial(
@@ -309,6 +314,8 @@ class BunnyAce:
 
             if self._serial.is_open:
                 self._connected = True
+                self._connection_error_reported = False
+                self._connection_success_reported = False
                 self._request_id = 0
                 logging.info(f'ACE: Connected to {self.serial_id}')
                 self.ace_dev_fd = self.reactor.register_fd(
@@ -325,8 +332,11 @@ class BunnyAce:
                 return self.reactor.NEVER
         except serial.serialutil.SerialException:
             self._serial = None
-            logging.info('ACE: Conn error')
-            self.log_error(f'Error connecting to {self.serial_id}')
+            logging.debug('ACE: Connection attempt failed: %s', self.serial_id)
+            if not getattr(self, '_connection_error_reported', False):
+                self._connection_error_reported = True
+                logging.warning('ACE: Not connected to %s; retrying automatically', self.serial_id)
+                self.log_warning('ACE is unavailable; waiting for connection')
         except Exception as e:
             self.log_error(f"ACE Error: {e}")
 
@@ -378,48 +388,11 @@ class BunnyAce:
             self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
             return
 
-        if raw_bytes:
-            text_buffer = self.read_buffer + raw_bytes
-            i = text_buffer.find(b'\xfe')
-            if i >= 0:
-                buffer = text_buffer
-                self.read_buffer = bytearray()
-            else:
-                self.read_buffer += raw_bytes
-                return
-        else:
-            return
-
-        if len(buffer) < 7:
-            return
-
-        if buffer[0:2] != bytes([0xFF, 0xAA]):
-            self.gcode.respond_info(f"Invalid data from ACE PRO (head bytes): {buffer}")
-            return
-
-        payload_len = struct.unpack('<H', buffer[2:4])[0]
-        payload = buffer[4:4 + payload_len]
-
-        crc_data = buffer[4 + payload_len:4 + payload_len + 2]
-        crc = struct.pack('@H', self._calc_crc(payload))
-
-        if len(buffer) < (4 + payload_len + 2 + 1):
-            self.gcode.respond_info(f"Invalid data from ACE PRO (len) {payload_len} {len(buffer)} {crc}")
-            self.gcode.respond_info(str(buffer))
-            return
-
-        if crc_data != crc:
-            self.gcode.respond_info('Invalid data from ACE PRO (CRC)')
-
-        try:
-            ret = json.loads(payload.decode('utf-8'))
-        except json.decoder.JSONDecodeError:
-            self.log_error('Invalid data from ACE PRO')
-            return
-        msg_id = ret['id']
-        if msg_id in self._callback_map:
-            callback = self._callback_map.pop(msg_id)
-            callback(self=self, response=ret)
+        self.read_buffer.extend(raw_bytes)
+        for response in decode_responses(self.read_buffer, self._calc_crc):
+            callback = self._callback_map.pop(response['id'], None)
+            if callback is not None:
+                callback(self=self, response=response)
 
     def _writer(self, eventtime):
         try:
@@ -763,9 +736,14 @@ class BunnyAce:
         if self.last_tool != -1:
             self._disable_feed_assist(self.last_tool)
             self.wait_ace_ready()
+            logging.info('ACE: unload gate=%s saved_filament_pos=%s cut_macros=%r',
+                         self.last_tool, self.save_variables.allVariables.get('ace_filament_pos', FILAMENT_POS_UNKNOWN),
+                         self.cut_macros)
             if self.save_variables.allVariables.get('ace_filament_pos', FILAMENT_POS_UNKNOWN) == FILAMENT_POS_LOADED:
                 self.ace_action = ACTION_CUTTING_FILAMENT
+                logging.info('ACE: running cutter macro: %s', self.cut_macros)
                 self.gcode.run_script_from_command(self.cut_macros)
+                logging.info('ACE: cutter macro completed')
                 self.filament_pos = FILAMENT_POS_IN_EXTRUDER
                 self.save_variable('ace_filament_pos', self.filament_pos, True)
                 self.ace_action = ACTION_IDLE
