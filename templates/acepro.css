@@ -102,7 +102,21 @@ button.ace-drying {
     min-width: 4.5em;
     min-height: 4.5em;
     -gtk-icon-transform: scale(3);
+    animation: none;
+    transition: none;
+    opacity: 1;
     color: #f4f6fa;
+}
+.ace-operation-body spinner:checked {
+    animation: ace-operation-spin 1s linear infinite;
+}
+@keyframes ace-operation-spin {
+    from {
+        -gtk-icon-transform: scale(3) rotate(0turn);
+    }
+    to {
+        -gtk-icon-transform: scale(3) rotate(1turn);
+    }
 }
 .ace-operation-label {
     font-size: 1.35em;
