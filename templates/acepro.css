@@ -88,12 +88,25 @@ button.ace-drying {
     padding: .2em;
     margin-bottom: .4em;
 }
-.ace-dryer-dialog, .ace-spool-dialog {
+.ace-dryer-dialog, .ace-spool-dialog, .ace-operation-dialog {
     background-color: #171e27;
     border: 1px solid #526075;
     border-radius: 12px;
     padding: .45em;
     margin: 0;
+}
+.ace-operation-body {
+    padding: 1em .6em;
+}
+.ace-operation-body spinner {
+    min-width: 4.5em;
+    min-height: 4.5em;
+    -gtk-icon-transform: scale(3);
+    color: #f4f6fa;
+}
+.ace-operation-label {
+    font-size: 1.35em;
+    font-weight: 600;
 }
 .ace-dryer-notice {
     padding: .8em .6em;

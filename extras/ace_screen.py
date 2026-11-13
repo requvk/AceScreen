@@ -5,6 +5,13 @@ import logging
 import math
 import queue
 import re
+import uuid
+
+from gcode import CommandError
+
+
+class OperationCancelled(CommandError):
+    pass
 
 
 class AceScreen:
@@ -14,13 +21,18 @@ class AceScreen:
         self.gcode = self.printer.lookup_object('gcode')
         self.response_timeout = config.getfloat('response_timeout', above=0.)
         self.operation_timeout = config.getfloat('operation_timeout', above=0.)
+        self.cancel_check_interval = config.getfloat('cancel_check_interval', above=0.)
         self.busy = False
         self.error = ''
         self.deadline = None
+        self.operation = None
+        self.cancel_requested = False
+        self._cleaning_up = False
         self.gcode.register_command('_ACE_SCREEN_RUN', self.cmd_RUN)
         self.gcode.register_command('_ACE_SCREEN_RESET', self.cmd_RESET)
         self.gcode.register_command('_ACE_SCREEN_SET_FILAMENT', self.cmd_SET_FILAMENT)
         self.printer.register_event_handler('klippy:ready', self._ready)
+        self.printer.lookup_object('webhooks').register_endpoint('ace_screen/cancel', self._handle_cancel)
 
     def _ready(self):
         self.ace = self.printer.lookup_object('ace')
@@ -32,6 +44,7 @@ class AceScreen:
         ace = getattr(self, 'ace', None)
         return {
             'busy': self.busy, 'error': self.error or getattr(ace, 'error_msg', ''),
+            'operation': dict(self.operation, cancelling=self.cancel_requested) if self.operation else None,
             'connected': hasattr(self, 'ace') and self.ace._connected,
             'gate_status': list(self.ace.gate_status) if hasattr(self, 'ace') else [-1] * 4,
             'gate_material': list(variables.get('ace_gate_type', [''] * 4)),
@@ -152,14 +165,76 @@ class AceScreen:
     def _check(self):
         if self.printer.is_shutdown():
             raise self.gcode.error('ACE: printer is shut down')
+        if self.busy and not self.ace._connected:
+            raise self.gcode.error('ACE: device is disconnected')
         if self.deadline is not None and self.reactor.monotonic() >= self.deadline:
             raise self.gcode.error('ACE: operation timed out; inspect the filament')
+
+    def _handle_cancel(self, web_request):
+        request = web_request.get_str('request').lower()
+        accepted = bool(self.busy and self.operation and self.operation['request'] == request)
+        if accepted:
+            self.cancel_requested = True
+        web_request.send({'accepted': accepted})
+
+    def check_cancel(self):
+        if not self.busy:
+            return
+        self._check()
+        if self.cancel_requested and not self._cleaning_up:
+            raise OperationCancelled('ACE: операция отменена пользователем')
+
+    def _wait_heat(self, gcmd):
+        # Keep Klipper's heater setup; only its blocking wait needs cancellation.
+        self.check_cancel()
+        self._script('M104 ' + gcmd.get_raw_command_parameters())
+        if gcmd.get_float('S', 0.) <= 0:
+            return
+        index = gcmd.get_int('T', None, minval=0)
+        extruder = (self.printer.lookup_object('toolhead').get_extruder() if index is None else
+                    self.printer.lookup_object('extruder%d' % index if index else 'extruder'))
+        heater = extruder.get_heater()
+        while heater.check_busy(self.reactor.monotonic()):
+            self.check_cancel()
+            self.reactor.pause(self.reactor.monotonic() + self.cancel_check_interval)
+        self.check_cancel()
+
+    def _confirm_stop(self, stop, index):
+        replies = []
+        stop(index, on_response=replies.append)
+        end = self.reactor.monotonic() + self.response_timeout
+        while not replies:
+            self._check()
+            if self.reactor.monotonic() >= end:
+                raise self.gcode.error('ACE: нет подтверждения остановки подачи')
+            self.reactor.pause(min(end, self.reactor.monotonic() + self.cancel_check_interval))
+        reply = replies[0]
+        if (not isinstance(reply, dict) or reply.get('code') != 0
+                or reply.get('msg') == 'FORBIDDEN'):
+            raise self.gcode.error('ACE: остановка подачи отклонена: %s' % reply)
+
+    def _finish_cancel(self):
+        self._cleaning_up = True
+        self.deadline = self.reactor.monotonic() + self.operation_timeout
+        try:
+            if self.ace.ace_action == 'Loading' and self.ace.current_gate >= 0:
+                self._confirm_stop(self.ace._stop_feeding, self.ace.current_gate)
+            if self.ace._feed_assist_index >= 0:
+                self._confirm_stop(self.ace._disable_feed_assist, self.ace._feed_assist_index)
+            self.ace.wait_ace_ready()
+            if self.ace.error_msg:
+                raise self.gcode.error(self.ace.error_msg)
+            self.ace.save_variable('ace_current_index', self.ace.current_gate, True)
+            self.ace.save_variable('ace_filament_pos', self.ace.filament_pos, True)
+            self.ace.ace_action = 'Idle'
+        finally:
+            self._cleaning_up = False
 
     def _pause(self, duration):
         end = self.reactor.monotonic() + duration
         while self.reactor.monotonic() < end:
             self._check()
-            self.reactor.pause(min(end, self.reactor.monotonic() + .1))
+            self.reactor.pause(min(end, self.reactor.monotonic() + self.cancel_check_interval))
 
     def _discard_request(self, request, callback):
         # Remove only this unanswered request after its caller has failed.
@@ -208,7 +283,9 @@ class AceScreen:
             raise self.gcode.error('ACE: unwind_filament failed: %s' % reply)
 
     def _native(self, script):
+        self.check_cancel()
         self._script(script)
+        self.check_cancel()
         # BunnyACE reports some device failures via log_error(), without raising.
         if self.ace.error_msg:
             raise self.gcode.error(self.ace.error_msg)
@@ -239,6 +316,7 @@ class AceScreen:
                     'Выгрузка отменена до движения' % command.split()[0])
 
     def _eject(self, gate):
+        self.check_cancel()
         options = self._macro_values('_ACE_UI_STATE', self.reactor.monotonic())
         length = options['eject_length']
         if not isinstance(length, int) or length <= 0:
@@ -256,6 +334,7 @@ class AceScreen:
         while not self.ace.is_ace_ready():
             self._check_eject(gate)
             self._pause(.1)
+        self.check_cancel()
         self._send_eject(gate, length, speed)
         # Acknowledgement accepts the request; the actual move finishes later.
         # Use BunnyACE's existing heartbeat and never resend the movement.
@@ -272,6 +351,7 @@ class AceScreen:
             if self.reactor.monotonic() >= earliest_finish and self.ace.is_ace_ready():
                 break
             self._pause(.1)
+        self.check_cancel()
         if self.ace.get_status(self.reactor.monotonic())['gate_status'][gate] != 0:
             raise self.gcode.error(
                 'ACE: после отката на %d мм датчик гейта %d всё ещё видит филамент; '
@@ -319,26 +399,38 @@ class AceScreen:
         if action == 'UNLOAD' and self.ace.current_gate == -1:
             gcmd.respond_info('ACE: сейчас ничего не загружено')
             return
+        if action == 'LOAD' and gate == self.ace.current_gate and self.ace.filament_pos != 10:
+            raise gcmd.error('ACE: загрузка этой катушки не завершена; проверьте положение филамента')
         if self.ace.current_gate >= 0 and (
                 action == 'UNLOAD' or action == 'LOAD' and gate != self.ace.current_gate
                 or action == 'EJECT' and gate == self.ace.current_gate):
             self._validate_unload(filament_present)
         self.busy = True
+        request = gcmd.get('REQUEST', uuid.uuid4().hex).lower()
+        self.operation = {'action': action, 'gate': gate, 'request': request}
+        self.cancel_requested = False
         started = False
+        restore_target = False
+        message = None
+        previous_m109 = None
+        previous_target = self.printer.lookup_object('extruder').get_status(now)['target']
         try:
             if not self.ace._connected:
                 raise gcmd.error('ACE: device is disconnected')
             gates = self.ace.get_status(now)['gate_status']
+            previous_m109 = self.gcode.register_command('M109', None)
+            self.gcode.register_command('M109', self._wait_heat)
             if action == 'LOAD':
                 if gates[gate] != 1:
                     raise gcmd.error('ACE: selected spool is not ready')
+                restore_target = gate != self.ace.current_gate
                 started = True
                 self._native('ACE_CHANGE_TOOL GATE=%d' % gate)
-                gcmd.respond_info('ACE: катушка %d загружена' % (gate + 1))
+                message = 'ACE: катушка %d загружена' % (gate + 1)
             elif action == 'UNLOAD':
                 started = True
                 self._native('ACE_CHANGE_TOOL GATE=-1')
-                gcmd.respond_info('ACE: филамент выгружен до сплиттера')
+                message = 'ACE: филамент выгружен до сплиттера'
             else:
                 if gates[gate] == 0:
                     gcmd.respond_info('ACE: выбранная катушка уже извлечена')
@@ -347,8 +439,19 @@ class AceScreen:
                 if gate == self.ace.current_gate:
                     self._native('ACE_CHANGE_TOOL GATE=-1')
                 self._eject(gate)
-                gcmd.respond_info('ACE: катушка %d извлечена, можно вынуть её из ACE Pro' % (gate + 1))
+                message = 'ACE: катушка %d извлечена, можно вынуть её из ACE Pro' % (gate + 1)
+        except OperationCancelled:
+            restore_target = True
+            try:
+                self._finish_cancel()
+            except Exception as exc:
+                self.error = 'Не удалось завершить отмену операции: %s' % exc
+                logging.exception('ACE Screen: cancellation failed')
+                raise
+            self.error = 'Операция отменена. Проверьте положение филамента перед следующей операцией.'
+            message = 'ACE: ' + self.error
         except Exception as exc:
+            restore_target = restore_target or self.cancel_requested
             if started:
                 self.error = str(exc)
                 logging.error('ACE Screen: %s gate=%d failed: %s', action, gate, exc)
@@ -356,13 +459,29 @@ class AceScreen:
         finally:
             self.deadline = None
             try:
-                for name, enabled in sensors:
-                    self._script('SET_FILAMENT_SENSOR SENSOR=%s ENABLE=%d' % (name, enabled))
+                if restore_target and not self.printer.is_shutdown():
+                    # Restore even if cancellation was interrupted by another error.
+                    self._script('M400\nM104 S%s' % previous_target)
+                    self.printer.lookup_object('gcode_move').reset_last_position()
             except Exception as exc:
-                self.error = 'ACE: unable to restore sensor settings: %s' % exc
+                self.error = 'ACE: unable to restore nozzle temperature: %s' % exc
                 raise
             finally:
-                self.busy = False
+                try:
+                    if previous_m109 is not None:
+                        self.gcode.register_command('M109', None)
+                        self.gcode.register_command('M109', previous_m109)
+                    for name, enabled in sensors:
+                        self._script('SET_FILAMENT_SENSOR SENSOR=%s ENABLE=%d' % (name, enabled))
+                except Exception as exc:
+                    self.error = 'ACE: unable to restore sensor settings: %s' % exc
+                    raise
+                finally:
+                    self.busy = False
+                    self.operation = None
+                    self.cancel_requested = False
+        if message is not None:
+            gcmd.respond_info(message)
 
     def cmd_RESET(self, gcmd):
         if self.busy:

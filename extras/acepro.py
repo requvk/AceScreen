@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 import re
 import time
+import uuid
 
 import gi
 
@@ -39,6 +40,10 @@ class Panel(ScreenPanel):
         self.dialog_layers = {}
         self.gate_dialog = None
         self.gate_context = None
+        self.operation_dialog = None
+        self.operation_context = None
+        self.operation_spinner = None
+        self.operation_error = ''
         self.dryer_selection = None
         self.dryer_pending = None
         self.dryer_error = ''
@@ -135,6 +140,7 @@ class Panel(ScreenPanel):
             self.timer = None
         self._close_picker()
         self._close_gate_dialog()
+        self._close_operation()
         self._close_dryer()
         self._close_dryer_notice()
         self.dryer_pending = None
@@ -176,9 +182,11 @@ class Panel(ScreenPanel):
 
     def _safe(self):
         return (self.snapshot.get('connected', False) and not self.snapshot.get('busy', True)
+                and self.operation_context is None
                 and self.print_state not in ('printing', 'paused', 'unknown'))
 
     def _render(self):
+        self._render_operation()
         materials = self._array('gate_material', '')
         colors = self._array('gate_color', 'FFFFFF')
         statuses = self._array('gate_status', -1)
@@ -193,7 +201,7 @@ class Panel(ScreenPanel):
             self.edit[gate].set_sensitive(self._safe() and statuses[gate] == 1)
         self.unload_button.set_sensitive(self._safe() and self.snapshot.get('filament_present', False))
         self._render_dryer()
-        message = self.dryer_error or self.snapshot.get('error') or (
+        message = self.operation_error or self.dryer_error or self.snapshot.get('error') or (
             '' if self.snapshot.get('connected') else 'Нет свежих данных ACE Pro')
         self.message.set_text(message)
         self.message.set_visible(bool(message))
@@ -203,7 +211,7 @@ class Panel(ScreenPanel):
             self._close_gate_dialog()
         self.suppressed = {(gate, token) for gate, token in self.suppressed
                            if self._array('tokens', -1)[gate] == token and statuses[gate] == 1}
-        if (self.dialog is None and self.gate_dialog is None and self.dryer_dialog is None
+        if (self.dialog is None and self.gate_dialog is None and self.operation_dialog is None and self.dryer_dialog is None
                 and self.dryer_notice is None and self._safe()
                 and not getattr(self._screen, 'dialogs', [])):
             for gate in self.snapshot.get('insertions', []):
@@ -224,7 +232,124 @@ class Panel(ScreenPanel):
 
     def _unload_clicked(self, widget):
         if self._safe() and self.snapshot.get('filament_present', False):
-            self._send(widget, '_ACE_UI_UNLOAD')
+            self._start_operation('UNLOAD')
+
+    def _start_operation(self, action, gate=-1):
+        if not self._safe():
+            return
+        ws = self._screen._ws
+        if ws is None or not ws.connected:
+            self.operation_error = 'Нет связи: операция не отправлена'
+            self._render()
+            return
+        context = {'action': action, 'gate': gate, 'request': uuid.uuid4().hex,
+                   'ws': ws, 'seen_busy': False, 'cancel_sent': False}
+        self.operation_context = context
+        self.operation_error = ''
+        self._close_picker()
+        self._render()
+        script = '_ACE_UI_%s REQUEST=%s' % (action, context['request'])
+        if gate >= 0:
+            script += ' GATE=%d' % gate
+        try:
+            sent = ws.send_method('printer.gcode.script', {'script': script}, self._operation_done, context)
+            if not sent:
+                raise RuntimeError('нет связи с принтером')
+        except Exception as exc:
+            self.operation_error = 'Не удалось начать операцию: %s' % exc
+            self._close_operation()
+            self._render()
+
+    def _render_operation(self):
+        operation = self.snapshot.get('operation') or {}
+        context = self.operation_context
+        if (self.active and self.snapshot.get('busy')
+                and operation.get('action') in ('LOAD', 'UNLOAD', 'EJECT') and operation.get('request')
+                and (context is None or context['seen_busy'] and operation['request'] != context['request'])):
+            context = self.operation_context = dict(operation, ws=self._screen._ws,
+                                                    seen_busy=True, cancel_sent=False)
+            self.operation_error = ''
+        if context is None:
+            return
+        matches = operation.get('request') == context['request']
+        if matches and self.snapshot.get('busy'):
+            context['seen_busy'] = True
+            context['cancel_sent'] = context['cancel_sent'] or operation.get('cancelling', False)
+        elif context['seen_busy'] and self.snapshot.get('connected') and self.snapshot.get('busy') is False:
+            self._close_operation()
+            return
+        elif context['ws'] is not self._screen._ws and self.snapshot.get('connected'):
+            self.operation_error = 'Связь восстановлена: проверьте результат операции'
+            self._close_operation()
+            return
+        if self.operation_dialog is None:
+            self._show_operation()
+        titles = {'LOAD': 'Загрузка', 'UNLOAD': 'Выгрузка', 'EJECT': 'Извлечение'}
+        self.operation_label.set_text('Отмена…' if context['cancel_sent'] else titles[context['action']])
+        ws = self._screen._ws
+        self.operation_dialog.get_widget_for_response(Gtk.ResponseType.CANCEL).set_sensitive(
+            bool(matches and context['seen_busy'] and not context['cancel_sent']
+                 and self.snapshot.get('connected') and ws is not None and ws.connected))
+
+    def _show_operation(self):
+        body = self._style(Gtk.Box(spacing=12, halign=Gtk.Align.CENTER), 'ace-operation-body')
+        self.operation_spinner = Gtk.Spinner()
+        self.operation_spinner.start()
+        self.operation_label = self._style(Gtk.Label(), 'ace-operation-label')
+        body.pack_start(self.operation_spinner, False, False, 0)
+        body.pack_start(self.operation_label, False, False, 0)
+        self.operation_dialog = self._gtk.Dialog(
+            'ACE Pro', [{'name': 'Отмена', 'response': Gtk.ResponseType.CANCEL}],
+            body, self._cancel_operation)
+        self.operation_dialog.connect('delete-event', self._cancel_operation)
+        self._compact_dialog(self.operation_dialog, (Gtk.ResponseType.CANCEL,), 'ace-operation-dialog')
+
+    def _cancel_operation(self, dialog, *args):
+        context = self.operation_context
+        operation = self.snapshot.get('operation') or {}
+        ws = self._screen._ws
+        if (dialog is not self.operation_dialog or context is None or context['cancel_sent']
+                or operation.get('request') != context['request'] or not self.snapshot.get('busy')
+                or ws is None or not ws.connected):
+            return True
+        context['cancel_sent'] = True
+        self._render()
+        try:
+            if not ws.send_method('printer.ace_screen.cancel', {'request': context['request']},
+                                  self._cancel_received, context):
+                raise RuntimeError('нет связи с принтером')
+        except Exception as exc:
+            context['cancel_sent'] = False
+            self.operation_error = 'Не удалось отправить отмену: %s' % exc
+            self._render()
+        return True
+
+    def _cancel_received(self, response, method, params, context):
+        if self.operation_context is not context:
+            return
+        if 'error' in response or not response.get('result', {}).get('accepted'):
+            context['cancel_sent'] = False
+            self.operation_error = 'Отмена не подтверждена: проверяю состояние операции'
+        self.pending_since = None
+        self._poll()
+
+    def _operation_done(self, response, method, params, context):
+        if self.operation_context is not context:
+            return
+        if 'error' in response:
+            self.operation_error = str(response['error'].get('message', 'Не удалось выполнить операцию'))
+        self.snapshot = {}
+        self._close_operation()
+        self._render()
+        self.pending_since = None
+        self._poll()
+
+    def _close_operation(self):
+        if self.operation_spinner is not None:
+            self.operation_spinner.stop()
+        if self.operation_dialog is not None:
+            self._gtk.remove_dialog(self.operation_dialog)
+        self.operation_dialog = self.operation_context = self.operation_spinner = None
 
     def _gate_clicked(self, widget, gate):
         if (not self._safe() or self.dialog is not None or self.gate_dialog is not None
@@ -258,7 +383,7 @@ class Panel(ScreenPanel):
         valid = self._safe() and self._valid_context(context)
         self._close_gate_dialog()
         if valid:
-            self._send(None, '_ACE_UI_%s GATE=%d' % (action, context['gate']))
+            self._start_operation(action, context['gate'])
 
     def _close_gate_dialog(self, dialog=None, *args):
         if self.gate_dialog is not None and (dialog is None or dialog is self.gate_dialog):
@@ -424,6 +549,8 @@ class Panel(ScreenPanel):
             self.dryer_notice = None
         if dialog is self.gate_dialog:
             self.gate_dialog = self.gate_context = None
+        if dialog is self.operation_dialog:
+            self.operation_dialog = None
 
     def _show_dryer_stopped(self):
         if self.dryer_notice is not None:

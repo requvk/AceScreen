@@ -417,10 +417,17 @@ class BunnyAce:
         self._queue.put([request, callback])
 
 
+    def _check_screen_cancel(self):
+        screen = self.printer.lookup_object('ace_screen', None)
+        if screen is not None:
+            screen.check_cancel()
+
     def wait_ace_ready(self):
+        self._check_screen_cancel()
         while self._info['status'] != 'ready':
             curr_ts = self.reactor.monotonic()
             self.reactor.pause(curr_ts + 0.5)
+            self._check_screen_cancel()
 
     def is_ace_ready(self):
         return self._info['status'] == 'ready'
@@ -428,8 +435,10 @@ class BunnyAce:
     def dwell(self, delay=1.0):
         curr_ts = self.reactor.monotonic()
         self.reactor.pause(curr_ts + delay)
+        self._check_screen_cancel()
 
     def _extruder_move(self, length, speed):
+        self._check_screen_cancel()
         pos = self.toolhead.get_position()
         pos[3] += length
         self.toolhead.move(pos, speed)
@@ -525,9 +534,11 @@ class BunnyAce:
 
         self._enable_feed_assist(index)
 
-    def _disable_feed_assist(self, index=-1):
+    def _disable_feed_assist(self, index=-1, on_response=None):
         def callback(self, response):
-            if response.get('code', 0) != 0:
+            if on_response is not None:
+                on_response(response)
+            if response.get('code', 0) != 0 or response.get('msg') == 'FORBIDDEN':
                 self.log_error(f"ACE Error: {response.get('msg')}")
                 return
 
@@ -620,9 +631,11 @@ class BunnyAce:
             request={"method": "update_feeding_speed", "params": {"index": index, "speed": speed}},
             callback=callback)
 
-    def _stop_feeding(self, index):
+    def _stop_feeding(self, index, on_response=None):
         def callback(self, response):
-            if response.get('code', 0) != 0:
+            if on_response is not None:
+                on_response(response)
+            if response.get('code', 0) != 0 or response.get('msg') == 'FORBIDDEN':
                 self.log_error(f"ACE Error: {response.get('msg')}")
                 return
 
@@ -631,6 +644,11 @@ class BunnyAce:
             callback=callback)
 
     def _park_to_toolhead(self, tool):
+        # AceScreen selects the saved spool temperature before loading begins.
+        if self.printer.lookup_object('gcode_macro _ACE_UI_HEAT_LOAD', None) is not None:
+            self.ace_action = ACTION_HEATING
+            self.gcode.run_script_from_command(f'_ACE_UI_HEAT_LOAD GATE={tool}')
+        self._check_screen_cancel()
         self.current_gate = tool
 
         self.wait_ace_ready()
@@ -688,6 +706,7 @@ class BunnyAce:
         self.filament_pos = FILAMENT_POS_LOADED
         self.save_variable('ace_filament_pos', self.filament_pos, True)
         self.gcode.run_script_from_command(self.poop_macros)
+        self._check_screen_cancel()
         self.ace_action = ACTION_IDLE
 
     def cmd_ACE_TTG_MAP(self, gcmd):
@@ -729,6 +748,7 @@ class BunnyAce:
 
         self.ace_action = ACTION_HEATING
         self.gcode.run_script_from_command(f'_ACE_PRE_TOOLCHANGE FROM={self.last_tool} TO={gate}')
+        self._check_screen_cancel()
 
         logging.info(f'ACE: Toolchange {self.last_tool} => {gate}')
         self.log_always(f'ACE: Toolchange {self.last_tool} => {gate}')
@@ -746,6 +766,7 @@ class BunnyAce:
                 logging.info('ACE: cutter macro completed')
                 self.filament_pos = FILAMENT_POS_IN_EXTRUDER
                 self.save_variable('ace_filament_pos', self.filament_pos, True)
+                self._check_screen_cancel()
                 self.ace_action = ACTION_IDLE
 
             if self.save_variables.allVariables.get('ace_filament_pos', FILAMENT_POS_UNKNOWN) == FILAMENT_POS_IN_EXTRUDER:
