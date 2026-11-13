@@ -428,6 +428,7 @@ class AceScreen:
                 self._native('ACE_CHANGE_TOOL GATE=%d' % gate)
                 message = 'ACE: катушка %d загружена' % (gate + 1)
             elif action == 'UNLOAD':
+                restore_target = True
                 started = True
                 self._native('ACE_CHANGE_TOOL GATE=-1')
                 message = 'ACE: филамент выгружен до сплиттера'
@@ -435,6 +436,7 @@ class AceScreen:
                 if gates[gate] == 0:
                     gcmd.respond_info('ACE: выбранная катушка уже извлечена')
                     return
+                restore_target = True
                 started = True
                 if gate == self.ace.current_gate:
                     self._native('ACE_CHANGE_TOOL GATE=-1')
