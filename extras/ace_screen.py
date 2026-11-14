@@ -162,6 +162,23 @@ class AceScreen:
     def _script(self, script):
         self.gcode.run_script_from_command(script)
 
+    def _restore_nozzle_target(self, target):
+        if not self.printer.is_shutdown():
+            self._script('M400\nM104 S%s' % target)
+            self.printer.lookup_object('gcode_move').reset_last_position()
+
+    def run_toolchange(self, change_tool, gate):
+        # Panel operations restore after their entire operation, including eject
+        # and cancellation cleanup. Direct G-code toolchanges need their own scope.
+        if self.busy:
+            return change_tool(gate)
+        previous_target = self.printer.lookup_object('extruder').get_status(
+            self.reactor.monotonic())['target']
+        try:
+            return change_tool(gate)
+        finally:
+            self._restore_nozzle_target(previous_target)
+
     def _check(self):
         if self.printer.is_shutdown():
             raise self.gcode.error('ACE: printer is shut down')
@@ -461,10 +478,9 @@ class AceScreen:
         finally:
             self.deadline = None
             try:
-                if restore_target and not self.printer.is_shutdown():
+                if restore_target:
                     # Restore even if cancellation was interrupted by another error.
-                    self._script('M400\nM104 S%s' % previous_target)
-                    self.printer.lookup_object('gcode_move').reset_last_position()
+                    self._restore_nozzle_target(previous_target)
             except Exception as exc:
                 self.error = 'ACE: unable to restore nozzle temperature: %s' % exc
                 raise

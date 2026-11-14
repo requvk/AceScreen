@@ -741,7 +741,12 @@ class BunnyAce:
                 self.gcode.run_script_from_command(f'_ACE_ON_EMPTY_ERROR INDEX={gate}')
                 return
 
+        screen = self.printer.lookup_object('ace_screen', None)
+        if screen is not None:
+            return screen.run_toolchange(self._change_tool, gate)
+        return self._change_tool(gate)
 
+    def _change_tool(self, gate):
         self.extruder_sensor = self.printer.lookup_object(f'filament_switch_sensor {self.extruder_sensor_name}')
         self.extruder_sensor.runout_helper.sensor_enabled = False
         self.last_tool = self.current_gate
