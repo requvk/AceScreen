@@ -643,11 +643,12 @@ class BunnyAce:
             request={"method": "stop_feed_filament", "params": {"index": index}},
             callback=callback)
 
-    def _park_to_toolhead(self, tool):
-        # AceScreen selects the saved spool temperature before loading begins.
+    def _park_to_toolhead(self, tool, minimum_target=0.):
+        # AceScreen preserves the pre-toolchange target when selecting load heat.
         if self.printer.lookup_object('gcode_macro _ACE_UI_HEAT_LOAD', None) is not None:
             self.ace_action = ACTION_HEATING
-            self.gcode.run_script_from_command(f'_ACE_UI_HEAT_LOAD GATE={tool}')
+            self.gcode.run_script_from_command(
+                f'_ACE_UI_HEAT_LOAD GATE={tool} MIN_TARGET={minimum_target}')
         self._check_screen_cancel()
         self.current_gate = tool
 
@@ -746,6 +747,8 @@ class BunnyAce:
         self.last_tool = self.current_gate
         self.next_tool = gate
 
+        load_target = self.printer.lookup_object('extruder').get_status(
+            self.reactor.monotonic())['target']
         self.ace_action = ACTION_HEATING
         self.gcode.run_script_from_command(f'_ACE_PRE_TOOLCHANGE FROM={self.last_tool} TO={gate}')
         self._check_screen_cancel()
@@ -793,14 +796,14 @@ class BunnyAce:
             self.ace_action = ACTION_IDLE
             if gate != -1:
                 try:
-                    self._park_to_toolhead(gate)
+                    self._park_to_toolhead(gate, load_target)
                 except AceException as e:
                     self.ace_action = ACTION_IDLE
                     self.log_error(str(e))
                     return
         else:
             try:
-                self._park_to_toolhead(gate)
+                self._park_to_toolhead(gate, load_target)
             except AceException as e:
                 self.ace_action = ACTION_IDLE
                 self.log_error(str(e))
