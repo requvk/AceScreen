@@ -279,6 +279,11 @@ start_klipper() {
   else
     sudo systemctl start klipper
   fi
+  klipper_start_status=$?
+  if [ "$klipper_start_status" -ne 0 ]; then
+    echo "[ERROR] Unable to start Klipper." >&2
+    return "$klipper_start_status"
+  fi
   echo "[OK]"
 }
 
@@ -305,6 +310,11 @@ stop_klipper() {
     /etc/init.d/S55klipper_service stop
   else
     sudo systemctl stop klipper
+  fi
+  klipper_stop_status=$?
+  if [ "$klipper_stop_status" -ne 0 ]; then
+    echo "[ERROR] Unable to stop Klipper." >&2
+    return "$klipper_stop_status"
   fi
   echo "[OK]"
 }
@@ -333,19 +343,19 @@ check_folders
 if [ "$UNINSTALL" -ne 1 ]; then
     find_klipperscreen || exit 1
 fi
-stop_klipper
+stop_klipper || exit "$?"
 
 if [ "$UNINSTALL" -ne 1 ]; then
     if ! link_extension || ! copy_config || ! install_screen_config || ! add_updater; then
         echo "[ERROR] Unable to complete installation."
-        start_klipper
+        start_klipper || exit "$?"
         exit 1
     fi
 else
     uninstall
 fi
 
-start_klipper
+start_klipper || exit "$?"
 if [ "$UNINSTALL" -ne 1 ]; then
     restart_klipperscreen || exit 1
 fi

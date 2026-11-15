@@ -23,6 +23,7 @@ class AceScreen:
         self.operation_timeout = config.getfloat('operation_timeout', above=0.)
         self.cancel_check_interval = config.getfloat('cancel_check_interval', above=0.)
         self.busy = False
+        self._operation_connection = None
         self.error = ''
         self.deadline = None
         self.operation = None
@@ -184,6 +185,8 @@ class AceScreen:
             raise self.gcode.error('ACE: printer is shut down')
         if self.busy and not self.ace._connected:
             raise self.gcode.error('ACE: device is disconnected')
+        if self.busy:
+            self.ace._check_connection(self._operation_connection)
         if self.deadline is not None and self.reactor.monotonic() >= self.deadline:
             raise self.gcode.error('ACE: operation timed out; inspect the filament')
 
@@ -423,6 +426,7 @@ class AceScreen:
                 or action == 'EJECT' and gate == self.ace.current_gate):
             self._validate_unload(filament_present)
         self.busy = True
+        self._operation_connection = self.ace._connection_generation
         request = gcmd.get('REQUEST', uuid.uuid4().hex).lower()
         self.operation = {'action': action, 'gate': gate, 'request': request}
         self.cancel_requested = False
@@ -496,6 +500,7 @@ class AceScreen:
                     raise
                 finally:
                     self.busy = False
+                    self._operation_connection = None
                     self.operation = None
                     self.cancel_requested = False
         if message is not None:

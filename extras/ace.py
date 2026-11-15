@@ -48,6 +48,9 @@ class BunnyAce:
 
     def __init__(self, config):
         self._connected = False
+        self._connection_generation = 0
+        self._toolchange_connection = None
+        self._queue = None
         self._serial = None
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
@@ -278,16 +281,48 @@ class BunnyAce:
             self._request_id = 0
         return self._request_id
 
+    def _fail_request(self, callback, ident=None):
+        if callback is None:
+            return
+        try:
+            callback(self=self, response={'id': ident, 'code': -1,
+                                         'msg': 'ACE connection lost; request aborted', 'result': {}})
+        except Exception:
+            logging.exception('ACE: request failure callback failed')
+
     def _serial_disconnect(self):
+        # Detach pending work before notifying callers; callbacks must not be able
+        # to queue a retry against the next connection.
+        self._connected = False
+        self._connection_generation += 1
+        self._info['status'] = 'disconnected'
         self.read_buffer.clear()
-        if self._serial is not None and self._serial.is_open:
-            self._serial.close()
-            self._connected = False
-        if self.heartbeat_timer:
-            self.reactor.unregister_timer(self.heartbeat_timer)
-        if self.ace_dev_fd:
-            self.reactor.set_fd_wake(self.ace_dev_fd, False, False)
-            self.ace_dev_fd = None
+        callbacks = list(self._callback_map.items())
+        self._callback_map.clear()
+        while self._queue is not None:
+            try:
+                task = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if task is not None:
+                callbacks.append((task[0].get('id'), task[1]))
+        fd, timer, port = self.ace_dev_fd, self.heartbeat_timer, self._serial
+        self.ace_dev_fd = self.heartbeat_timer = self._serial = None
+
+        def release(action, *args):
+            try:
+                action(*args)
+            except Exception:
+                logging.exception('ACE: transport cleanup failed')
+
+        if fd is not None:
+            release(self.reactor.unregister_fd, fd)
+        if timer is not None:
+            release(self.reactor.unregister_timer, timer)
+        if port is not None:
+            release(port.close)
+        for ident, callback in callbacks:
+            self._fail_request(callback, ident)
 
     def _connect(self, eventtime):
         logging.debug('ACE: Trying to connect to %s', self.serial_id)
@@ -316,7 +351,6 @@ class BunnyAce:
                 self._connected = True
                 self._connection_error_reported = False
                 self._connection_success_reported = False
-                self._request_id = 0
                 logging.info(f'ACE: Connected to {self.serial_id}')
                 self.ace_dev_fd = self.reactor.register_fd(
                     self._serial.fileno(),
@@ -326,18 +360,20 @@ class BunnyAce:
                 self.heartbeat_timer = self.reactor.register_timer(self._periodic_heartbeat_event, self.reactor.NOW)
                 self.send_request(request={"method": "get_info"},
                                   callback=lambda self, response: info_callback(self, response))
-                if self.current_gate != -1:
+                # Reconnection must not restart an interrupted filament operation.
+                if self.current_gate != -1 and self._connection_generation == 0:
                     self._enable_feed_assist(self._feed_assist_index)
                 self.reactor.unregister_timer(self.connect_timer)
                 return self.reactor.NEVER
         except serial.serialutil.SerialException:
-            self._serial = None
+            self._serial_disconnect()
             logging.debug('ACE: Connection attempt failed: %s', self.serial_id)
             if not getattr(self, '_connection_error_reported', False):
                 self._connection_error_reported = True
                 logging.warning('ACE: Not connected to %s; retrying automatically', self.serial_id)
                 self.log_warning('ACE is unavailable; waiting for connection')
         except Exception as e:
+            self._serial_disconnect()
             self.log_error(f"ACE Error: {e}")
 
         return eventtime + 1
@@ -366,7 +402,7 @@ class BunnyAce:
 
     def _periodic_heartbeat_event(self, eventtime):
         def callback(self, response):
-            if response is not None:
+            if response is not None and response.get('code', 0) == 0:
                 self._info = response['result']
                 self.gate_status = [GATE_EMPTY if data['status'] == 'empty' else GATE_AVAILABLE
                                     for data in self._info['slots']]
@@ -375,6 +411,8 @@ class BunnyAce:
         return eventtime + 2.5
 
     def _reader(self, eventtime):
+        if not self._connected or self._serial is None:
+            return
         try:
             if self._serial.in_waiting:
                 raw_bytes = self._serial.read(size=self._serial.in_waiting)
@@ -395,6 +433,8 @@ class BunnyAce:
                 callback(self=self, response=response)
 
     def _writer(self, eventtime):
+        if not self._connected or self._queue is None:
+            return
         try:
             if not self._queue.empty():
                 task = self._queue.get()
@@ -411,37 +451,55 @@ class BunnyAce:
             self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
 
     def send_request(self, request, callback):
+        if not self._connected or self._queue is None:
+            self._fail_request(callback, request.get('id'))
+            return
         self._info['status'] = 'busy'
         if self.ace_dev_fd:
             self.reactor.set_fd_wake(self.ace_dev_fd, True, True)
         self._queue.put([request, callback])
 
 
+    def _check_connection(self, generation=None):
+        if generation is None:
+            generation = self._toolchange_connection
+        if (not self._connected or generation is not None
+                and generation != self._connection_generation):
+            raise self.gcode.error('ACE: connection lost; filament operation aborted')
+
     def _check_screen_cancel(self):
+        self._check_connection()
         screen = self.printer.lookup_object('ace_screen', None)
         if screen is not None:
             screen.check_cancel()
 
     def wait_ace_ready(self):
         self._check_screen_cancel()
+        generation = self._connection_generation
         while self._info['status'] != 'ready':
             curr_ts = self.reactor.monotonic()
             self.reactor.pause(curr_ts + 0.5)
+            self._check_connection(generation)
             self._check_screen_cancel()
 
     def is_ace_ready(self):
         return self._info['status'] == 'ready'
 
     def dwell(self, delay=1.0):
+        generation = self._connection_generation
         curr_ts = self.reactor.monotonic()
         self.reactor.pause(curr_ts + delay)
+        self._check_connection(generation)
         self._check_screen_cancel()
 
     def _extruder_move(self, length, speed):
         self._check_screen_cancel()
+        generation = self._connection_generation
         pos = self.toolhead.get_position()
         pos[3] += length
         self.toolhead.move(pos, speed)
+        self._check_connection(generation)
+        self._check_screen_cancel()
         return pos[3]
 
     cmd_ACE_SENSOR_RUNOUT_help = 'Extruder sensor runout gcode'
@@ -766,15 +824,21 @@ class BunnyAce:
         sensor = self.printer.lookup_object(
             f'filament_switch_sensor {self.extruder_sensor_name}').runout_helper
         sensor_enabled = sensor.sensor_enabled
+        previous_connection = self._toolchange_connection
+        self._toolchange_connection = self._connection_generation
         try:
             if screen is not None:
-                return screen.run_toolchange(self._change_tool, gate)
-            return self._change_tool(gate)
+                result = screen.run_toolchange(self._change_tool, gate)
+            else:
+                result = self._change_tool(gate)
+            self._check_screen_cancel()
+            return result
         except Exception:
             if not manual:
                 self.ace_action = ACTION_IDLE
             raise
         finally:
+            self._toolchange_connection = previous_connection
             # The panel restores its flags after cancellation/eject cleanup.
             if not manual:
                 sensor.sensor_enabled = sensor_enabled
