@@ -595,15 +595,35 @@ class BunnyAce:
         self._feed(index, length, speed)
 
     def _retract(self, index, length, speed):
+        replies = []
+
         def callback(self, response):
-            if response.get('code', 0) != 0:
-                self.log_error(f"ACE Error: {response.get('msg')}")
-                return
+            # Serial callbacks must not raise G-code errors in the reactor.
+            replies.append(response)
 
         self.wait_ace_ready()
-        self.send_request(
-            request={"method": "unwind_filament", "params": {"index": index, "length": length, "speed": speed}},
-            callback=callback)
+        screen = self.printer.lookup_object('ace_screen', None)
+        started = self.reactor.monotonic()
+        request = {"method": "unwind_filament", "params": {"index": index, "length": length, "speed": speed}}
+        try:
+            self.send_request(request=request, callback=callback)
+            while not replies:
+                self._check_screen_cancel()
+                if self.printer.is_shutdown() or not self._connected:
+                    raise self.gcode.error('ACE: connection lost while waiting for unwind_filament')
+                if screen is not None and self.reactor.monotonic() - started >= screen.response_timeout:
+                    raise self.gcode.error('ACE: no response to unwind_filament')
+                self.dwell(screen.cancel_check_interval if screen is not None else 0.5)
+        except Exception:
+            if screen is not None:
+                screen._discard_request(request, callback)
+            raise
+        reply = replies[0]
+        if (not isinstance(reply, dict) or reply.get('code') != 0
+                or reply.get('msg') == 'FORBIDDEN'):
+            message = 'ACE Error: unwind_filament failed: %s' % reply
+            self.log_error(message)
+            raise self.gcode.error(message)
         self.dwell(delay=(length / speed) + 0.1)
 
     cmd_ACE_RETRACT_help = 'Retracts filament back to ACE'
@@ -742,9 +762,22 @@ class BunnyAce:
                 return
 
         screen = self.printer.lookup_object('ace_screen', None)
-        if screen is not None:
-            return screen.run_toolchange(self._change_tool, gate)
-        return self._change_tool(gate)
+        manual = screen is not None and screen.busy
+        sensor = self.printer.lookup_object(
+            f'filament_switch_sensor {self.extruder_sensor_name}').runout_helper
+        sensor_enabled = sensor.sensor_enabled
+        try:
+            if screen is not None:
+                return screen.run_toolchange(self._change_tool, gate)
+            return self._change_tool(gate)
+        except Exception:
+            if not manual:
+                self.ace_action = ACTION_IDLE
+            raise
+        finally:
+            # The panel restores its flags after cancellation/eject cleanup.
+            if not manual:
+                sensor.sensor_enabled = sensor_enabled
 
     def _change_tool(self, gate):
         self.extruder_sensor = self.printer.lookup_object(f'filament_switch_sensor {self.extruder_sensor_name}')
@@ -805,14 +838,14 @@ class BunnyAce:
                 except AceException as e:
                     self.ace_action = ACTION_IDLE
                     self.log_error(str(e))
-                    return
+                    raise self.gcode.error(str(e))
         else:
             try:
                 self._park_to_toolhead(gate, load_target)
             except AceException as e:
                 self.ace_action = ACTION_IDLE
                 self.log_error(str(e))
-                return
+                raise self.gcode.error(str(e))
 
         gcode_move = self.printer.lookup_object('gcode_move')
         gcode_move.reset_last_position()
